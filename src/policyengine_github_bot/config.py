@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # GitHub App credentials
     github_app_id: int
-    github_private_key: str  # PEM-encoded private key
+    github_private_key: str  # PEM-encoded private key (with \n for newlines)
     github_webhook_secret: str
 
     # Anthropic API

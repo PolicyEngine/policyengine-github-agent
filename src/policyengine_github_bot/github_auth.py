@@ -8,6 +8,12 @@ from github import Auth, Github, GithubIntegration
 from policyengine_github_bot.config import get_settings
 
 
+def get_private_key() -> str:
+    """Get the private key with newlines properly converted."""
+    settings = get_settings()
+    return settings.github_private_key.replace("\\n", "\n")
+
+
 def get_jwt_token() -> str:
     """Generate a JWT for GitHub App authentication."""
     settings = get_settings()
@@ -19,14 +25,14 @@ def get_jwt_token() -> str:
         "iss": settings.github_app_id,
     }
 
-    return jwt.encode(payload, settings.github_private_key, algorithm="RS256")
+    return jwt.encode(payload, get_private_key(), algorithm="RS256")
 
 
 def get_github_client(installation_id: int) -> Github:
     """Get a GitHub client authenticated as an installation."""
     settings = get_settings()
 
-    auth = Auth.AppAuth(settings.github_app_id, settings.github_private_key)
+    auth = Auth.AppAuth(settings.github_app_id, get_private_key())
     gi = GithubIntegration(auth=auth)
     installation_auth = gi.get_access_token(installation_id)
 
@@ -37,7 +43,7 @@ def get_installation_id(owner: str, repo: str) -> int:
     """Get the installation ID for a repository."""
     settings = get_settings()
 
-    auth = Auth.AppAuth(settings.github_app_id, settings.github_private_key)
+    auth = Auth.AppAuth(settings.github_app_id, get_private_key())
     gi = GithubIntegration(auth=auth)
 
     installation = gi.get_repo_installation(owner, repo)
