@@ -8,9 +8,11 @@ import logfire
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import ValidationError
 
+from policyengine_github_bot.claude_code import execute_task, gather_review_context
 from policyengine_github_bot.config import get_settings
 from policyengine_github_bot.github_auth import (
     get_github_client,
+    get_installation_token,
     get_review_threads,
     reply_to_review_thread,
     resolve_review_thread,
@@ -57,6 +59,27 @@ def contains_mention(text: str | None) -> bool:
     if not text:
         return False
     return bool(MENTION_PATTERN.search(text))
+
+
+# Patterns that suggest the user wants the bot to take action (not just answer)
+TASK_PATTERNS = [
+    r"\b(fix|implement|add|create|update|change|modify|remove|delete|refactor)\b.*\b(this|the|a|an)\b",
+    r"\bfile\s+(a\s+)?pr\b",
+    r"\bcreate\s+(a\s+)?pr\b",
+    r"\bopen\s+(a\s+)?pr\b",
+    r"\bsubmit\s+(a\s+)?pr\b",
+    r"\bmake\s+(a\s+)?(change|fix|update)\b",
+    r"\bcan\s+you\s+(fix|implement|add|create|update)\b",
+    r"\bplease\s+(fix|implement|add|create|update)\b",
+]
+TASK_PATTERN = re.compile("|".join(TASK_PATTERNS), re.IGNORECASE)
+
+
+def is_task_request(text: str | None) -> bool:
+    """Check if text is asking the bot to perform a task (vs just asking a question)."""
+    if not text:
+        return False
+    return bool(TASK_PATTERN.search(text))
 
 
 def fetch_claude_md(github, repo_full_name: str) -> str | None:
@@ -191,7 +214,7 @@ async def handle_issue_event(data: dict):
         logfire.error(f"{prefix} - no installation ID")
         return
 
-    await respond_to_issue(payload)
+    await respond_to_issue(payload, was_mentioned=True)
 
 
 async def handle_issue_comment_event(data: dict):
@@ -260,12 +283,17 @@ async def handle_issue_comment_event(data: dict):
         sender=payload.sender,
     )
 
-    await respond_to_issue(issue_payload, comment_context=payload.comment.body)
+    await respond_to_issue(
+        issue_payload,
+        comment_context=payload.comment.body,
+        was_mentioned=mentioned,
+    )
 
 
 async def respond_to_issue(
     payload: IssueWebhookPayload,
     comment_context: str | None = None,
+    was_mentioned: bool = False,
 ):
     """Generate and post a response to an issue."""
     repo = payload.repository.full_name
@@ -274,7 +302,17 @@ async def respond_to_issue(
 
     with logfire.span(prefix, repo=repo, issue_number=issue_num):
         github = get_github_client(payload.installation.id)
+        gh_repo = github.get_repo(repo)
+        gh_issue = gh_repo.get_issue(issue_num)
 
+        # Only use Claude Code for task requests when explicitly mentioned
+        request_text = comment_context or payload.issue.body
+        if was_mentioned and is_task_request(request_text):
+            logfire.info(f"{prefix} - detected task request with mention, using Claude Code")
+            await handle_task_request(payload, gh_repo, gh_issue, request_text)
+            return
+
+        # Otherwise, handle as a normal question/response
         # Fetch CLAUDE.md for context
         claude_md = fetch_claude_md(github, repo)
 
@@ -293,11 +331,55 @@ async def respond_to_issue(
         )
 
         # Post comment
-        gh_repo = github.get_repo(repo)
-        gh_issue = gh_repo.get_issue(issue_num)
         gh_issue.create_comment(response_text)
 
         logfire.info(f"{prefix} - responded ({len(response_text)} chars)")
+
+
+async def handle_task_request(payload: IssueWebhookPayload, gh_repo, gh_issue, request_text: str):
+    """Handle a request to perform a task using Claude Code."""
+    repo = payload.repository.full_name
+    issue_num = payload.issue.number
+    prefix = f"[task] {repo}#{issue_num}"
+
+    # Post an acknowledgment
+    gh_issue.create_comment("On it! I'll work on this and file a PR if I can make the fix.")
+
+    # Get default branch
+    default_branch = gh_repo.default_branch
+
+    # Build task description from issue context
+    task = f"""Issue #{issue_num}: {payload.issue.title}
+
+{payload.issue.body or "(no description)"}
+
+Request: {request_text}"""
+
+    # Execute the task
+    logfire.info(f"{prefix} - executing task via Claude Code...")
+    token = get_installation_token(payload.installation.id)
+
+    result = await execute_task(
+        repo_url=f"https://github.com/{repo}",
+        base_ref=default_branch,
+        task=task,
+        issue_number=issue_num,
+        token=token,
+    )
+
+    # Post result
+    if result.success:
+        if result.pr_url:
+            response = f"Done! I've created a PR: {result.pr_url}"
+        else:
+            response = f"I've completed the task. Here's what I did:\n\n{result.output[:2000]}"
+    else:
+        response = (
+            f"I wasn't able to complete this task. Here's what happened:\n\n{result.output[:1000]}"
+        )
+
+    gh_issue.create_comment(response)
+    logfire.info(f"{prefix} - task complete (success={result.success}, pr={result.pr_url})")
 
 
 async def handle_pull_request_event(data: dict):
@@ -342,7 +424,10 @@ async def handle_pull_request_review_event(data: dict):
     logfire.info(f"[pr_review] {repo}#{pr_num} @{reviewer} - {action}")
 
 
-async def review_pull_request(payload: PullRequestWebhookPayload):
+async def review_pull_request(
+    payload: PullRequestWebhookPayload,
+    use_claude_code: bool = True,
+):
     """Generate and post a PR review."""
     repo = payload.repository.full_name
     pr_num = payload.pull_request.number
@@ -367,13 +452,37 @@ async def review_pull_request(payload: PullRequestWebhookPayload):
 
         logfire.info(f"{prefix} - {len(files_changed)} files, {len(diff)} chars diff")
 
+        # Gather enhanced context via Claude Code (optional)
+        codebase_context = None
+        if use_claude_code:
+            try:
+                logfire.info(f"{prefix} - gathering codebase context via Claude Code...")
+                token = get_installation_token(payload.installation.id)
+                codebase_context = await gather_review_context(
+                    repo_url=f"https://github.com/{repo}",
+                    ref=payload.pull_request.head["ref"],
+                    files_changed=[f["filename"] for f in files_changed],
+                    pr_title=payload.pull_request.title,
+                    pr_body=payload.pull_request.body,
+                    token=token,
+                )
+                logfire.info(f"{prefix} - got {len(codebase_context)} chars context")
+            except Exception as e:
+                logfire.warn(f"{prefix} - Claude Code failed, continuing without: {e}")
+
+        # Combine contexts
+        repo_context = claude_md or ""
+        if codebase_context:
+            repo_context += f"\n\n## Codebase context (from exploration)\n\n{codebase_context}"
+        repo_context = repo_context.strip() or None
+
         # Generate review
         logfire.info(f"{prefix} - generating review...")
         review = await generate_pr_review(
             pr=payload.pull_request,
             diff=diff,
             files_changed=files_changed,
-            repo_context=claude_md,
+            repo_context=repo_context,
         )
 
         # Map approval to GitHub event type
