@@ -444,14 +444,14 @@ async def review_pull_request(payload: PullRequestWebhookPayload):
             gh_repo = github.get_repo(payload.repository.full_name)
             gh_pr = gh_repo.get_pull(payload.pull_request.number)
 
-            # Get the diff
+            # Get the diff - build it from file patches
             diff = ""
             try:
-                import httpx
-
-                diff_url = gh_pr.diff_url
-                response = httpx.get(diff_url)
-                diff = response.text
+                diff_parts = []
+                for f in gh_pr.get_files():
+                    if f.patch:
+                        diff_parts.append(f"--- a/{f.filename}\n+++ b/{f.filename}\n{f.patch}")
+                diff = "\n\n".join(diff_parts)
                 logfire.info("Fetched PR diff", diff_length=len(diff))
             except Exception as e:
                 logfire.error("Failed to fetch PR diff", error=str(e))
