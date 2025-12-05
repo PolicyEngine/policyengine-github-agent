@@ -12,9 +12,14 @@ from policyengine_github_bot.config import get_settings
 from policyengine_github_bot.github_auth import (
     get_github_client,
     get_review_threads,
+    reply_to_review_thread,
     resolve_review_thread,
 )
-from policyengine_github_bot.llm import generate_issue_response, generate_pr_review
+from policyengine_github_bot.llm import (
+    generate_issue_response,
+    generate_pr_rereview,
+    generate_pr_review,
+)
 from policyengine_github_bot.models import (
     GitHubPullRequest,
     GitHubUser,
@@ -337,23 +342,17 @@ async def handle_pull_request_review_event(data: dict):
     logfire.info(f"[pr_review] {repo}#{pr_num} @{reviewer} - {action}")
 
 
-async def review_pull_request(
-    payload: PullRequestWebhookPayload,
-    rereview_context: str | None = None,
-    open_threads: list[dict] | None = None,
-):
+async def review_pull_request(payload: PullRequestWebhookPayload):
     """Generate and post a PR review."""
     repo = payload.repository.full_name
     pr_num = payload.pull_request.number
-    is_rereview = rereview_context is not None
-    review_type = "re-review" if is_rereview else "review"
-    prefix = f"[{review_type}] {repo}#{pr_num}"
+    prefix = f"[review] {repo}#{pr_num}"
 
     if not payload.installation:
         logfire.error(f"{prefix} - no installation ID")
         return
 
-    with logfire.span(prefix, repo=repo, pr_number=pr_num, is_rereview=is_rereview):
+    with logfire.span(prefix, repo=repo, pr_number=pr_num):
         github = get_github_client(payload.installation.id)
 
         # Fetch CLAUDE.md for context
@@ -364,31 +363,7 @@ async def review_pull_request(
         gh_repo = github.get_repo(repo)
         gh_pr = gh_repo.get_pull(pr_num)
 
-        # Get the diff - build it from file patches with line number context
-        diff = ""
-        try:
-            diff_parts = []
-            for f in gh_pr.get_files():
-                if f.patch:
-                    file_diff = f"File: {f.filename}\n"
-                    file_diff += f"--- a/{f.filename}\n+++ b/{f.filename}\n"
-                    file_diff += f.patch
-                    diff_parts.append(file_diff)
-            diff = "\n\n".join(diff_parts)
-        except Exception as e:
-            logfire.error(f"{prefix} - failed to fetch diff: {e}")
-
-        # Get files changed
-        files_changed = []
-        for f in gh_pr.get_files():
-            files_changed.append(
-                {
-                    "filename": f.filename,
-                    "additions": f.additions,
-                    "deletions": f.deletions,
-                    "status": f.status,
-                }
-            )
+        diff, files_changed = get_pr_diff_and_files(gh_pr, prefix)
 
         logfire.info(f"{prefix} - {len(files_changed)} files, {len(diff)} chars diff")
 
@@ -399,8 +374,6 @@ async def review_pull_request(
             diff=diff,
             files_changed=files_changed,
             repo_context=claude_md,
-            rereview_context=rereview_context,
-            open_threads=open_threads,
         )
 
         # Map approval to GitHub event type
@@ -433,16 +406,36 @@ async def review_pull_request(
         else:
             gh_pr.create_review(body=review.summary, event=event)
 
-        # Resolve threads that the LLM identified as addressed
-        if open_threads and review.threads_to_resolve:
-            logfire.info(f"{prefix} - resolving {len(review.threads_to_resolve)} threads")
-            for idx in review.threads_to_resolve:
-                if 0 <= idx < len(open_threads):
-                    thread_id = open_threads[idx].get("id")
-                    if thread_id:
-                        await resolve_review_thread(payload.installation.id, thread_id)
-
         logfire.info(f"{prefix} - done ({event})")
+
+
+def get_pr_diff_and_files(gh_pr, prefix: str) -> tuple[str, list[dict]]:
+    """Fetch diff and files changed from a PR."""
+    diff = ""
+    try:
+        diff_parts = []
+        for f in gh_pr.get_files():
+            if f.patch:
+                file_diff = f"File: {f.filename}\n"
+                file_diff += f"--- a/{f.filename}\n+++ b/{f.filename}\n"
+                file_diff += f.patch
+                diff_parts.append(file_diff)
+        diff = "\n\n".join(diff_parts)
+    except Exception as e:
+        logfire.error(f"{prefix} - failed to fetch diff: {e}")
+
+    files_changed = []
+    for f in gh_pr.get_files():
+        files_changed.append(
+            {
+                "filename": f.filename,
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "status": f.status,
+            }
+        )
+
+    return diff, files_changed
 
 
 async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
@@ -458,47 +451,14 @@ async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
         gh_repo = github.get_repo(repo)
         gh_pr = gh_repo.get_pull(pr_num)
 
-        # Fetch previous reviews from the bot to include as context
-        previous_reviews = []
-        try:
-            for review in gh_pr.get_reviews():
-                if review.user.login.lower() in [u.lower() for u in BOT_USERNAMES]:
-                    previous_reviews.append(
-                        {
-                            "state": review.state,
-                            "body": review.body,
-                        }
-                    )
-            logfire.info(f"{prefix} - found {len(previous_reviews)} previous bot reviews")
-        except Exception as e:
-            logfire.error(f"{prefix} - failed to fetch previous reviews: {e}")
+        # Fetch CLAUDE.md for context
+        claude_md = fetch_claude_md(github, repo)
 
-        # Build PR payload for review
-        pr_payload = PullRequestWebhookPayload(
-            action="rereview",
-            pull_request=GitHubPullRequest(
-                id=gh_pr.id,
-                number=gh_pr.number,
-                title=gh_pr.title,
-                body=gh_pr.body,
-                state=gh_pr.state,
-                user=GitHubUser(login=gh_pr.user.login, id=gh_pr.user.id),
-                head={"sha": gh_pr.head.sha, "ref": gh_pr.head.ref},
-                base={"sha": gh_pr.base.sha, "ref": gh_pr.base.ref},
-            ),
-            repository=payload.repository,
-            installation=payload.installation,
-            sender=payload.sender,
-        )
+        # Get diff and files
+        diff, files_changed = get_pr_diff_and_files(gh_pr, prefix)
+        logfire.info(f"{prefix} - {len(files_changed)} files, {len(diff)} chars diff")
 
-        # Include the comment that triggered re-review and previous reviews as context
-        rereview_context = f"Re-review requested by @{requester}:\n{payload.comment.body}"
-        if previous_reviews:
-            rereview_context += "\n\nPrevious review(s) from this bot:\n"
-            for prev in previous_reviews:
-                rereview_context += f"\n[{prev['state']}]: {prev['body']}\n"
-
-        # Fetch open review threads for potential resolution
+        # Fetch open review threads
         owner, repo_name = repo.split("/")
         all_threads = await get_review_threads(
             payload.installation.id,
@@ -507,10 +467,86 @@ async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
             pr_num,
         )
         open_threads = [t for t in all_threads if not t.get("isResolved", False)]
-        logfire.info(f"{prefix} - {len(open_threads)} open threads to check")
+        logfire.info(f"{prefix} - {len(open_threads)} open threads")
 
-        await review_pull_request(
-            pr_payload,
-            rereview_context=rereview_context,
-            open_threads=open_threads,
+        # Build context for re-review
+        rereview_context = f"Re-review requested by @{requester}:\n{payload.comment.body}"
+
+        # Build PR model for LLM
+        pr_model = GitHubPullRequest(
+            id=gh_pr.id,
+            number=gh_pr.number,
+            title=gh_pr.title,
+            body=gh_pr.body,
+            state=gh_pr.state,
+            user=GitHubUser(login=gh_pr.user.login, id=gh_pr.user.id),
+            head={"sha": gh_pr.head.sha, "ref": gh_pr.head.ref},
+            base={"sha": gh_pr.base.sha, "ref": gh_pr.base.ref},
         )
+
+        # Generate re-review response
+        logfire.info(f"{prefix} - generating re-review...")
+        rereview = await generate_pr_rereview(
+            pr=pr_model,
+            diff=diff,
+            files_changed=files_changed,
+            open_threads=open_threads,
+            rereview_context=rereview_context,
+            repo_context=claude_md,
+        )
+
+        # Process thread actions
+        resolved_count = 0
+        replied_count = 0
+        for action in rereview.thread_actions:
+            idx = action.thread_index
+            if 0 <= idx < len(open_threads):
+                thread_id = open_threads[idx].get("id")
+                if not thread_id:
+                    continue
+
+                if action.action.upper() == "RESOLVE":
+                    await resolve_review_thread(payload.installation.id, thread_id)
+                    resolved_count += 1
+                elif action.action.upper() == "REPLY" and action.reply:
+                    await reply_to_review_thread(
+                        payload.installation.id,
+                        thread_id,
+                        action.reply,
+                    )
+                    replied_count += 1
+
+        logfire.info(f"{prefix} - resolved {resolved_count}, replied {replied_count}")
+
+        # Only post a new review if there are new comments
+        if rereview.new_comments:
+            review_comments = []
+            for comment in rereview.new_comments:
+                review_comments.append(
+                    {
+                        "path": comment.path,
+                        "line": comment.line,
+                        "body": comment.body,
+                    }
+                )
+
+            event = "COMMENT"
+            if rereview.approval:
+                event_map = {
+                    "APPROVE": "APPROVE",
+                    "REQUEST_CHANGES": "REQUEST_CHANGES",
+                    "COMMENT": "COMMENT",
+                }
+                event = event_map.get(rereview.approval.upper(), "COMMENT")
+
+            summary = rereview.summary or "Re-review complete."
+            logfire.info(f"{prefix} - posting {event} with {len(review_comments)} new comments")
+            gh_pr.create_review(
+                body=summary,
+                event=event,
+                comments=review_comments,
+            )
+        else:
+            logfire.info(f"{prefix} - no new comments, only thread actions")
+
+        logfire.info(f"{prefix} - done")

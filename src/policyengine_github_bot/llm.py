@@ -8,6 +8,7 @@ from policyengine_github_bot.models import (
     GitHubIssue,
     GitHubPullRequest,
     IssueResponse,
+    PRReReviewResponse,
     PRReviewResponse,
 )
 
@@ -124,8 +125,6 @@ async def generate_pr_review(
     diff: str,
     files_changed: list[dict],
     repo_context: str | None = None,
-    rereview_context: str | None = None,
-    open_threads: list[dict] | None = None,
 ) -> PRReviewResponse:
     """Generate a PR review using Claude."""
     logfire.info(
@@ -135,8 +134,6 @@ async def generate_pr_review(
         files_changed=len(files_changed),
         diff_length=len(diff),
         has_repo_context=repo_context is not None,
-        is_rereview=rereview_context is not None,
-        open_thread_count=len(open_threads) if open_threads else 0,
     )
 
     agent = get_pr_review_agent(repo_context)
@@ -159,28 +156,7 @@ Files changed:
 Diff (with line numbers from @@ headers showing new file line positions):
 ```diff
 {diff}
-```"""
-
-    if rereview_context:
-        prompt += f"""
-
-This is a RE-REVIEW. Context:
-{rereview_context}
-
-Check if previous concerns have been addressed. Focus on what changed since the last review."""
-
-        if open_threads:
-            prompt += "\n\nOpen review threads from previous reviews:\n"
-            for i, thread in enumerate(open_threads):
-                first_comment = thread.get("comments", {}).get("nodes", [{}])[0]
-                author = first_comment.get("author", {}).get("login", "unknown")
-                body = first_comment.get("body", "(no body)")
-                prompt += f"\n[Thread {i}] by {author}: {body}\n"
-            prompt += """
-For each thread above that has been FULLY addressed by the current code, include its \
-index number in threads_to_resolve. Only resolve threads where the concern is clearly fixed."""
-
-    prompt += """
+```
 
 Provide a thorough but concise review. Include inline comments on specific lines where you have \
 feedback. Use the line numbers from the RIGHT side of the diff (the + lines in the new version). \
@@ -193,6 +169,116 @@ Each inline comment should reference a specific file path and line number."""
         pr_number=pr.number,
         approval=result.output.approval,
         comment_count=len(result.output.comments),
+    )
+
+    return result.output
+
+
+def get_pr_rereview_agent(
+    repo_context: str | None = None,
+) -> Agent[None, PRReReviewResponse]:
+    """Create an agent for re-reviewing pull requests."""
+    settings = get_settings()
+
+    system = (
+        BASE_SYSTEM_PROMPT
+        + """
+
+You are re-reviewing a pull request after changes were made. Your job is to:
+1. Check if previous review comments have been addressed
+2. Decide what to do with each open thread
+3. Only add NEW comments if there are genuinely new issues
+
+For each open thread, you must decide:
+- RESOLVE: The issue has been fixed. Use this when the code change addresses the concern.
+- REPLY: The issue is NOT fixed or needs follow-up. Provide a reply explaining why.
+
+IMPORTANT: Do NOT post a whole new review unless there are genuinely NEW issues to comment on.
+- If all threads are resolved and no new issues, just resolve threads (no new_comments needed)
+- If threads need replies, reply to them (no new_comments needed)
+- Only use new_comments for issues on lines NOT already covered by existing threads
+
+Be concise in replies. Examples:
+- "Fixed, thanks!"
+- "This still needs attention - the edge case for X isn't handled."
+- "Good improvement, but consider also handling Y."
+"""
+    )
+
+    if repo_context:
+        system += f"\n\nRepository context:\n{repo_context}"
+
+    return Agent(
+        f"anthropic:{settings.anthropic_model}",
+        output_type=PRReReviewResponse,
+        system_prompt=system,
+    )
+
+
+async def generate_pr_rereview(
+    pr: GitHubPullRequest,
+    diff: str,
+    files_changed: list[dict],
+    open_threads: list[dict],
+    rereview_context: str,
+    repo_context: str | None = None,
+) -> PRReReviewResponse:
+    """Generate a re-review response for a PR."""
+    logfire.info(
+        "Generating PR re-review",
+        pr_number=pr.number,
+        pr_title=pr.title,
+        open_thread_count=len(open_threads),
+    )
+
+    agent = get_pr_rereview_agent(repo_context)
+
+    files_summary = "\n".join(
+        f"- {f['filename']} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
+        for f in files_changed
+    )
+
+    # Build thread list for the prompt
+    threads_text = ""
+    for i, thread in enumerate(open_threads):
+        comments = thread.get("comments", {}).get("nodes", [])
+        if comments:
+            first = comments[0]
+            author = first.get("author", {}).get("login", "unknown")
+            body = first.get("body", "(no body)")
+            threads_text += f"\n[Thread {i}] by @{author}:\n{body}\n"
+
+    prompt = f"""Re-review this pull request.
+
+Title: {pr.title}
+
+Description:
+{pr.body or "(no description provided)"}
+
+Files changed:
+{files_summary}
+
+Current diff:
+```diff
+{diff}
+```
+
+Context for this re-review:
+{rereview_context}
+
+Open threads that need your attention:
+{threads_text}
+
+For each thread above, decide whether to RESOLVE it (if fixed) or REPLY (if not fixed).
+Only add new_comments if there are genuinely NEW issues not covered by existing threads."""
+
+    result = await agent.run(prompt)
+
+    logfire.info(
+        "Generated PR re-review",
+        pr_number=pr.number,
+        thread_actions=len(result.output.thread_actions),
+        new_comments=len(result.output.new_comments),
     )
 
     return result.output

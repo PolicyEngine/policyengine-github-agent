@@ -129,7 +129,35 @@ class PRReviewResponse(BaseModel):
         default_factory=list,
         description="Inline comments on specific lines",
     )
-    threads_to_resolve: list[int] = Field(
+
+
+class ThreadAction(BaseModel):
+    """Action to take on an existing review thread during re-review."""
+
+    thread_index: int = Field(description="Index of the thread from the provided list")
+    action: str = Field(description="One of: RESOLVE (issue fixed), REPLY (needs response)")
+    reply: str | None = Field(
+        default=None,
+        description="Reply text if action is REPLY (e.g. 'Still not addressed' or a follow-up)",
+    )
+
+
+class PRReReviewResponse(BaseModel):
+    """Response for a re-review of a PR."""
+
+    thread_actions: list[ThreadAction] = Field(
         default_factory=list,
-        description="Indices of review threads that have been addressed and should be resolved",
+        description="Actions to take on existing open threads",
+    )
+    new_comments: list[PRReviewComment] = Field(
+        default_factory=list,
+        description="New inline comments on lines not previously commented on",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="Optional summary if posting a new review (only if new_comments exist)",
+    )
+    approval: str | None = Field(
+        default=None,
+        description="One of: APPROVE, REQUEST_CHANGES, COMMENT - only if posting new review",
     )

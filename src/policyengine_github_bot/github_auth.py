@@ -166,3 +166,42 @@ async def resolve_review_thread(installation_id: int, thread_id: str) -> bool:
     except Exception as e:
         logfire.error(f"[graphql] failed to resolve thread {thread_id[:8]}...: {e}")
         return False
+
+
+async def reply_to_review_thread(
+    installation_id: int,
+    thread_id: str,
+    body: str,
+) -> bool:
+    """Reply to a review thread via GraphQL."""
+    mutation = """
+    mutation($thread_id: ID!, $body: String!) {
+      addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread_id, body: $body}) {
+        comment {
+          id
+        }
+      }
+    }
+    """
+
+    try:
+        result = await graphql_request(
+            installation_id,
+            mutation,
+            {"thread_id": thread_id, "body": body},
+        )
+
+        comment_id = (
+            result.get("data", {})
+            .get("addPullRequestReviewThreadReply", {})
+            .get("comment", {})
+            .get("id")
+        )
+
+        if comment_id:
+            logfire.info(f"[graphql] replied to thread {thread_id[:8]}...")
+            return True
+        return False
+    except Exception as e:
+        logfire.error(f"[graphql] failed to reply to thread {thread_id[:8]}...: {e}")
+        return False
