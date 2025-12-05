@@ -61,25 +61,30 @@ def contains_mention(text: str | None) -> bool:
     return bool(MENTION_PATTERN.search(text))
 
 
-# Patterns that suggest the user wants the bot to take action (not just answer)
-TASK_PATTERNS = [
-    r"\b(fix|implement|add|create|update|change|modify|remove|delete|refactor)\b.*\b(this|the|a|an)\b",
-    r"\bfile\s+(a\s+)?pr\b",
-    r"\bcreate\s+(a\s+)?pr\b",
-    r"\bopen\s+(a\s+)?pr\b",
-    r"\bsubmit\s+(a\s+)?pr\b",
-    r"\bmake\s+(a\s+)?(change|fix|update)\b",
-    r"\bcan\s+you\s+(fix|implement|add|create|update)\b",
-    r"\bplease\s+(fix|implement|add|create|update)\b",
-]
-TASK_PATTERN = re.compile("|".join(TASK_PATTERNS), re.IGNORECASE)
+async def classify_request(text: str) -> bool:
+    """Use Haiku to classify if a request needs Claude Code.
 
+    Returns True if the request requires codebase access (Claude Code task).
+    """
+    import anthropic
 
-def is_task_request(text: str | None) -> bool:
-    """Check if text is asking the bot to perform a task (vs just asking a question)."""
-    if not text:
-        return False
-    return bool(TASK_PATTERN.search(text))
+    client = anthropic.AsyncAnthropic()
+
+    prompt = f"""Classify this GitHub issue/comment. Does it require codebase access?
+
+Request: {text}
+
+Reply with ONLY "Y" (needs codebase - count files, find code, fix bugs, make changes)
+or "N" (no codebase needed - general questions, explanations, advice)."""
+
+    response = await client.messages.create(
+        model="claude-haiku-4-20250514",
+        max_tokens=1,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    result = response.content[0].text.strip().upper()
+    return result == "Y"
 
 
 def fetch_claude_md(github, repo_full_name: str) -> str | None:
@@ -306,11 +311,13 @@ async def respond_to_issue(
         gh_issue = gh_repo.get_issue(issue_num)
 
         # Only use Claude Code for task requests when explicitly mentioned
-        request_text = comment_context or payload.issue.body
-        if was_mentioned and is_task_request(request_text):
-            logfire.info(f"{prefix} - detected task request with mention, using Claude Code")
-            await handle_task_request(payload, gh_repo, gh_issue, request_text)
-            return
+        request_text = comment_context or payload.issue.body or ""
+        if was_mentioned and request_text:
+            needs_codebase = await classify_request(request_text)
+            logfire.info(f"{prefix} - classified request (needs_codebase={needs_codebase})")
+            if needs_codebase:
+                await handle_task_request(payload, gh_repo, gh_issue, request_text)
+                return
 
         # Otherwise, handle as a normal question/response
         # Fetch CLAUDE.md for context
