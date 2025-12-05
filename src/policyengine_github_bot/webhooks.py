@@ -61,35 +61,6 @@ def contains_mention(text: str | None) -> bool:
     return bool(MENTION_PATTERN.search(text))
 
 
-async def classify_request(text: str) -> bool:
-    """Use Haiku to classify if a request needs Claude Code.
-
-    Returns True if the request requires codebase access (Claude Code task).
-    """
-    import anthropic
-
-    logfire.info("[classify] Classifying request", text_preview=text[:100])
-
-    client = anthropic.AsyncAnthropic()
-
-    prompt = f"""Classify this GitHub issue/comment. Does it require codebase access?
-
-Request: {text}
-
-Reply with ONLY "Y" (needs codebase - count files, find code, fix bugs, make changes)
-or "N" (no codebase needed - general questions, explanations, advice)."""
-
-    response = await client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    result = response.content[0].text.strip().upper()
-    logfire.info("[classify] Result", result=result, needs_codebase=(result == "Y"))
-    return result == "Y"
-
-
 def fetch_claude_md(github, repo_full_name: str) -> str | None:
     """Fetch CLAUDE.md from a repository if it exists."""
     try:
@@ -303,7 +274,7 @@ async def respond_to_issue(
     comment_context: str | None = None,
     was_mentioned: bool = False,
 ):
-    """Generate and post a response to an issue."""
+    """Generate and post a response to an issue using Claude Code."""
     repo = payload.repository.full_name
     issue_num = payload.issue.number
     prefix = f"[issue] {repo}#{issue_num}"
@@ -313,26 +284,18 @@ async def respond_to_issue(
         gh_repo = github.get_repo(repo)
         gh_issue = gh_repo.get_issue(issue_num)
 
-        # Only use Claude Code for task requests when explicitly mentioned
         request_text = comment_context or payload.issue.body or ""
-        if was_mentioned and request_text:
-            needs_codebase = await classify_request(request_text)
-            logfire.info(f"{prefix} - classified request (needs_codebase={needs_codebase})")
-            if needs_codebase:
-                await handle_task_request(payload, gh_repo, gh_issue, request_text)
-                return
 
-        # Otherwise, handle as a normal question/response
-        # Fetch CLAUDE.md for context
+        # Use Claude Code by default when mentioned
+        if was_mentioned:
+            await handle_claude_code_request(payload, gh_repo, gh_issue, request_text)
+            return
+
+        # For continuing conversations (not mentioned), use simple LLM response
         claude_md = fetch_claude_md(github, repo)
+        conversation = get_conversation_context(github, repo, issue_num)
+        logfire.info(f"{prefix} - loaded {len(conversation)} previous comments")
 
-        # Get conversation history if responding to a comment
-        conversation = []
-        if comment_context:
-            conversation = get_conversation_context(github, repo, issue_num)
-            logfire.info(f"{prefix} - loaded {len(conversation)} previous comments")
-
-        # Generate response
         logfire.info(f"{prefix} - generating response...")
         response_text = await generate_issue_response(
             issue=payload.issue,
@@ -340,34 +303,43 @@ async def respond_to_issue(
             conversation=conversation if conversation else None,
         )
 
-        # Post comment
         gh_issue.create_comment(response_text)
-
         logfire.info(f"{prefix} - responded ({len(response_text)} chars)")
 
 
-async def handle_task_request(payload: IssueWebhookPayload, gh_repo, gh_issue, request_text: str):
-    """Handle a request to perform a task using Claude Code."""
+async def handle_claude_code_request(
+    payload: IssueWebhookPayload, gh_repo, gh_issue, request_text: str
+):
+    """Handle any request using Claude Code - questions, tasks, fixes, etc."""
     repo = payload.repository.full_name
     issue_num = payload.issue.number
-    prefix = f"[task] {repo}#{issue_num}"
+    prefix = f"[claude-code] {repo}#{issue_num}"
 
-    # Post an acknowledgment
-    gh_issue.create_comment("On it! I'll work on this and file a PR if I can make the fix.")
-
-    # Get default branch
+    # Get default branch and token
     default_branch = gh_repo.default_branch
+    token = get_installation_token(payload.installation.id)
 
-    # Build task description from issue context
-    task = f"""Issue #{issue_num}: {payload.issue.title}
+    # Build context for Claude Code
+    task = f"""You are responding to a GitHub issue.
 
+Repository: {repo}
+Issue #{issue_num}: {payload.issue.title}
+
+Issue description:
 {payload.issue.body or "(no description)"}
 
-Request: {request_text}"""
+User request:
+{request_text}
 
-    # Execute the task
-    logfire.info(f"{prefix} - executing task via Claude Code...")
-    token = get_installation_token(payload.installation.id)
+Instructions:
+- Read the codebase to understand context if needed
+- Answer questions, fix bugs, implement features, or do whatever is requested
+- If you need to make code changes, create a branch, commit, and open a PR
+- Use `gh` CLI for GitHub operations (PRs, issues, etc.)
+- Be concise and helpful in your response
+- Your final output will be posted as a comment on the issue"""
+
+    logfire.info(f"{prefix} - executing via Claude Code...")
 
     result = await execute_task(
         repo_url=f"https://github.com/{repo}",
@@ -379,17 +351,15 @@ Request: {request_text}"""
 
     # Post result
     if result.success:
-        if result.pr_url:
-            response = f"Done! I've created a PR: {result.pr_url}"
-        else:
-            response = f"I've completed the task. Here's what I did:\n\n{result.output[:2000]}"
+        # Truncate if very long
+        output = result.output
+        if len(output) > 4000:
+            output = output[:4000] + "\n\n...(truncated)"
+        gh_issue.create_comment(output)
     else:
-        response = (
-            f"I wasn't able to complete this task. Here's what happened:\n\n{result.output[:1000]}"
-        )
+        gh_issue.create_comment(f"I ran into an issue:\n\n```\n{result.output[:1000]}\n```")
 
-    gh_issue.create_comment(response)
-    logfire.info(f"{prefix} - task complete (success={result.success}, pr={result.pr_url})")
+    logfire.info(f"{prefix} - complete (success={result.success}, pr={result.pr_url})")
 
 
 async def handle_pull_request_event(data: dict):

@@ -23,6 +23,7 @@ def run_claude_code(
     prompt: str,
     workdir: Path,
     timeout: int = 300,
+    env: dict | None = None,
 ) -> str:
     """Run Claude Code CLI in a directory and return output.
 
@@ -30,6 +31,7 @@ def run_claude_code(
         prompt: The prompt to send to Claude Code
         workdir: Working directory for Claude Code to operate in
         timeout: Timeout in seconds (default 5 minutes)
+        env: Optional environment variables (e.g. for GH_TOKEN)
 
     Returns:
         The output from Claude Code
@@ -50,6 +52,7 @@ def run_claude_code(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
 
     if result.returncode != 0:
@@ -165,8 +168,8 @@ async def execute_task(
 ) -> TaskResult:
     """Use Claude Code to execute a task in a repository.
 
-    This is for tasks that modify code - fixing bugs, implementing features,
-    filing PRs, etc. Claude Code will have full access to make changes.
+    Claude Code has full access to the codebase and can answer questions,
+    make changes, create PRs, etc.
 
     Args:
         repo_url: HTTPS URL of the repository
@@ -179,29 +182,19 @@ async def execute_task(
     Returns:
         TaskResult with output, success status, and PR URL if created
     """
+    import os
     import re
 
     branch_suffix = f"issue-{issue_number}" if issue_number else "bot-task"
-    pr_ref = f" that references issue #{issue_number}" if issue_number else ""
 
-    prompt = f"""You are working on a task for the PolicyEngine GitHub bot.
+    prompt = f"""{task}
 
-Task: {task}
+If you need to make code changes:
+- Create a new branch named 'bot/{branch_suffix}'
+- Commit with a clear message
+- Push and create a PR (use `gh pr create`)
 
-Instructions:
-1. Understand what needs to be done
-2. Make the necessary code changes
-3. Create a new branch named 'bot/{branch_suffix}' from the current branch
-4. Commit your changes with a clear message
-5. Push the branch and create a pull request{pr_ref}
-
-Important:
-- Be concise in commit messages and PR descriptions
-- Only make changes directly related to the task
-- If you can't complete the task, explain why
-- Use `gh` CLI for GitHub operations (creating PRs, etc.)
-
-When done, output a summary of what you did and include the PR URL if you created one."""
+Be concise. Your output will be posted as a GitHub comment."""
 
     with get_temp_repo_dir() as tmpdir:
         try:
@@ -224,7 +217,12 @@ When done, output a summary of what you did and include the PR URL if you create
                 check=True,
             )
 
-            output = run_claude_code(prompt, repo_path, timeout=timeout)
+            # Set up environment with GitHub token for gh CLI
+            env = os.environ.copy()
+            if token:
+                env["GH_TOKEN"] = token
+
+            output = run_claude_code(prompt, repo_path, timeout=timeout, env=env)
 
             # Try to extract PR URL from output
             pr_url = None
