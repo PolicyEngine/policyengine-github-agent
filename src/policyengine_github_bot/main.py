@@ -20,7 +20,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-logfire.instrument_fastapi(app)
+logfire.instrument_fastapi(app, capture_headers=True, request_attributes_mapper=None)
+logfire.instrument_requests()
 
 app.include_router(webhook_router)
 

@@ -1,55 +1,70 @@
-"""LLM integration for generating responses."""
+"""LLM integration for generating responses using pydantic-ai."""
 
-import anthropic
+import logfire
+from pydantic_ai import Agent
 
 from policyengine_github_bot.config import get_settings
+from policyengine_github_bot.models import GitHubIssue, IssueResponse
+
+SYSTEM_PROMPT = """You are PolicyEngine's helpful GitHub bot. You respond to issues on \
+PolicyEngine repositories with helpful, accurate information.
+
+PolicyEngine is an open-source project that models tax and benefit policy. Key repos include:
+- policyengine-us: US tax-benefit microsimulation model
+- policyengine-uk: UK tax-benefit microsimulation model
+- policyengine-core: Core simulation engine
+- policyengine-app: React web application
+
+Be concise, helpful, and technical when appropriate. Use British English.
+Don't be overly formal - be friendly but professional.
+
+If you need more information to help, ask clarifying questions."""
 
 
-def get_anthropic_client() -> anthropic.Anthropic:
-    """Get an Anthropic client."""
+def get_issue_agent(repo_context: str | None = None) -> Agent[None, IssueResponse]:
+    """Create an agent for responding to GitHub issues."""
     settings = get_settings()
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    system = SYSTEM_PROMPT
+    if repo_context:
+        system += f"\n\nRepository-specific context from CLAUDE.md:\n{repo_context}"
+
+    return Agent(
+        f"anthropic:{settings.anthropic_model}",
+        output_type=IssueResponse,
+        system_prompt=system,
+    )
 
 
-def generate_issue_response(
-    issue_title: str,
-    issue_body: str,
+async def generate_issue_response(
+    issue: GitHubIssue,
     repo_context: str | None = None,
 ) -> str:
     """Generate a response to a GitHub issue using Claude."""
-    settings = get_settings()
-    client = get_anthropic_client()
-
-    system_prompt = (
-        "You are PolicyEngine's helpful GitHub bot. You respond to issues on "
-        "PolicyEngine repositories with helpful, accurate information.\n\n"
-        "PolicyEngine is an open-source project that models tax and benefit policy. "
-        "Key repos include:\n"
-        "- policyengine-us: US tax-benefit microsimulation model\n"
-        "- policyengine-uk: UK tax-benefit microsimulation model\n"
-        "- policyengine-core: Core simulation engine\n"
-        "- policyengine-app: React web application\n\n"
-        "Be concise, helpful, and technical when appropriate. Use British English. "
-        "Don't be overly formal - be friendly but professional."
+    logfire.info(
+        "Generating issue response",
+        issue_number=issue.number,
+        issue_title=issue.title,
+        has_repo_context=repo_context is not None,
     )
 
-    if repo_context:
-        system_prompt += f"\n\nRepository-specific context from CLAUDE.md:\n{repo_context}"
+    agent = get_issue_agent(repo_context)
 
-    user_message = f"""Please respond to this GitHub issue:
+    prompt = f"""Please respond to this GitHub issue:
 
-Title: {issue_title}
+Title: {issue.title}
 
 Body:
-{issue_body}
+{issue.body or "(no body provided)"}
 
-Provide a helpful response. If you need more information to help, ask clarifying questions."""
+Provide a helpful response."""
 
-    response = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=2048,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
+    result = await agent.run(prompt)
+
+    logfire.info(
+        "Generated response",
+        issue_number=issue.number,
+        response_length=len(result.output.content),
     )
 
-    return response.content[0].text
+    return result.output.content
