@@ -245,10 +245,10 @@ async def handle_issue_comment_event(data: dict):
     else:
         logfire.info(f"{prefix} - bot mentioned")
 
-    # If this is a PR and we're mentioned, do a re-review
+    # If this is a PR and we're mentioned, do a review (or re-review if already reviewed)
     if is_pr and mentioned:
-        logfire.info(f"{prefix} - triggering PR re-review")
-        await handle_pr_rereview(payload)
+        logfire.info(f"{prefix} - triggering PR review")
+        await handle_pr_comment_review(payload)
         return
 
     # Otherwise handle as a normal issue comment
@@ -438,19 +438,63 @@ def get_pr_diff_and_files(gh_pr, prefix: str) -> tuple[str, list[dict]]:
     return diff, files_changed
 
 
-async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
-    """Handle a re-review request on a PR via comment mention."""
+async def handle_pr_comment_review(payload: IssueCommentWebhookPayload):
+    """Handle a review request on a PR via comment mention.
+
+    If the bot has previously reviewed, do a re-review (check threads).
+    Otherwise, do a fresh full review.
+    """
+    repo = payload.repository.full_name
+    pr_num = payload.issue.number
+    requester = payload.sender.login
+
+    github = get_github_client(payload.installation.id)
+    gh_repo = github.get_repo(repo)
+    gh_pr = gh_repo.get_pull(pr_num)
+
+    # Check if bot has previously reviewed this PR
+    has_previous_review = False
+    try:
+        for review in gh_pr.get_reviews():
+            if review.user.login.lower() in [u.lower() for u in BOT_USERNAMES]:
+                has_previous_review = True
+                break
+    except Exception as e:
+        logfire.error(f"[pr] {repo}#{pr_num} - failed to check previous reviews: {e}")
+
+    if has_previous_review:
+        # Do a re-review (check threads, resolve/reply)
+        await do_pr_rereview(payload, github, gh_repo, gh_pr)
+    else:
+        # First time review - do a full review
+        logfire.info(f"[review] {repo}#{pr_num} @{requester} - first review via comment")
+        pr_payload = PullRequestWebhookPayload(
+            action="review_requested",
+            pull_request=GitHubPullRequest(
+                id=gh_pr.id,
+                number=gh_pr.number,
+                title=gh_pr.title,
+                body=gh_pr.body,
+                state=gh_pr.state,
+                user=GitHubUser(login=gh_pr.user.login, id=gh_pr.user.id),
+                head={"sha": gh_pr.head.sha, "ref": gh_pr.head.ref},
+                base={"sha": gh_pr.base.sha, "ref": gh_pr.base.ref},
+            ),
+            repository=payload.repository,
+            installation=payload.installation,
+            sender=payload.sender,
+        )
+        await review_pull_request(pr_payload)
+
+
+async def do_pr_rereview(payload, github, gh_repo, gh_pr):
+    """Perform a re-review on a PR that was previously reviewed."""
     repo = payload.repository.full_name
     pr_num = payload.issue.number
     requester = payload.sender.login
     prefix = f"[re-review] {repo}#{pr_num} @{requester}"
 
-    github = get_github_client(payload.installation.id)
-
     with logfire.span(prefix, repo=repo, pr_number=pr_num, requester=requester):
-        gh_repo = github.get_repo(repo)
-        gh_pr = gh_repo.get_pull(pr_num)
-
         # Fetch CLAUDE.md for context
         claude_md = fetch_claude_md(github, repo)
 
@@ -518,7 +562,7 @@ async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
 
         logfire.info(f"{prefix} - resolved {resolved_count}, replied {replied_count}")
 
-        # Only post a new review if there are new comments
+        # Post a new review if there are new comments
         if rereview.new_comments:
             review_comments = []
             for comment in rereview.new_comments:
@@ -547,6 +591,20 @@ async def handle_pr_rereview(payload: IssueCommentWebhookPayload):
                 comments=review_comments,
             )
         else:
-            logfire.info(f"{prefix} - no new comments, only thread actions")
+            # No new review, but leave a comment explaining what we did
+            logfire.info(f"{prefix} - no new comments, posting summary comment")
+            summary_parts = []
+            if resolved_count > 0:
+                summary_parts.append(f"resolved {resolved_count} thread(s)")
+            if replied_count > 0:
+                summary_parts.append(f"replied to {replied_count} thread(s)")
+
+            if summary_parts:
+                comment_body = f"Re-review complete: {', '.join(summary_parts)}."
+            else:
+                comment_body = "Re-review complete. No changes needed."
+
+            # Post as an issue comment (not a review)
+            gh_repo.get_issue(pr_num).create_comment(comment_body)
 
         logfire.info(f"{prefix} - done")
