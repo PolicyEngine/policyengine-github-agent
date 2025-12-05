@@ -78,7 +78,7 @@ Reply with ONLY "Y" (needs codebase - count files, find code, fix bugs, make cha
 or "N" (no codebase needed - general questions, explanations, advice)."""
 
     response = await client.messages.create(
-        model="claude-haiku-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=1,
         messages=[{"role": "user", "content": prompt}],
     )

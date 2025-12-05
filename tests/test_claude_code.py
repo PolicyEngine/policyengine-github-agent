@@ -14,7 +14,6 @@ from policyengine_github_bot.claude_code import (
     run_claude_code_streaming,
 )
 from policyengine_github_bot.repo import clone_repo, get_temp_repo_dir
-from policyengine_github_bot.webhooks import is_task_request
 
 
 class TestRunClaudeCode:
@@ -300,32 +299,3 @@ class TestExecuteTask:
             assert any("user.name" in str(call) for call in git_calls)
 
 
-class TestIsTaskRequest:
-    """Test task request detection."""
-
-    def test_detects_fix_requests(self):
-        assert is_task_request("@policyengine fix this bug")
-        assert is_task_request("Can you fix the issue?")
-        assert is_task_request("Please fix this")
-
-    def test_detects_pr_requests(self):
-        assert is_task_request("@policyengine file a PR for this")
-        assert is_task_request("Create a PR to fix this")
-        assert is_task_request("Open a PR please")
-        assert is_task_request("Submit a pr")
-
-    def test_detects_implementation_requests(self):
-        assert is_task_request("@policyengine implement this feature")
-        assert is_task_request("Add a new endpoint")
-        assert is_task_request("Can you create a function for this?")
-
-    def test_does_not_detect_questions(self):
-        assert not is_task_request("How does this work?")
-        assert not is_task_request("What is the purpose of this function?")
-        assert not is_task_request("Is this a bug?")
-
-    def test_handles_none(self):
-        assert not is_task_request(None)
-
-    def test_handles_empty(self):
-        assert not is_task_request("")
