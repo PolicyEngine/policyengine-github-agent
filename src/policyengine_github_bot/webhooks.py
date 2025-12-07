@@ -311,6 +311,9 @@ async def respond_to_issue(
         logfire.info(f"{prefix} - responded ({len(response_text)} chars)")
 
 
+ENGINEERING_LABEL = "⚙️ Engineering..."
+
+
 async def handle_claude_code_request(
     payload: IssueWebhookPayload, gh_repo, gh_issue, request_text: str
 ):
@@ -320,12 +323,19 @@ async def handle_claude_code_request(
     prefix = f"[claude-code] {repo}#{issue_num}"
 
     with logfire.span(prefix, repo=repo, issue_number=issue_num):
-        # Get default branch and token
-        default_branch = gh_repo.default_branch
-        token = get_installation_token(payload.installation.id)
+        # Add engineering label to show we're working on it
+        try:
+            gh_issue.add_to_labels(ENGINEERING_LABEL)
+        except Exception as e:
+            logfire.warn(f"{prefix} - failed to add label: {e}")
 
-        # Build context for Claude Code
-        task = f"""You are responding to a GitHub issue.
+        try:
+            # Get default branch and token
+            default_branch = gh_repo.default_branch
+            token = get_installation_token(payload.installation.id)
+
+            # Build context for Claude Code
+            task = f"""You are responding to a GitHub issue.
 
 Repository: {repo}
 Issue #{issue_num}: {payload.issue.title}
@@ -344,27 +354,34 @@ Instructions:
 - Be concise and helpful in your response
 - Your final output will be posted as a comment on the issue"""
 
-        logfire.info(f"{prefix} - executing via Claude Code...")
+            logfire.info(f"{prefix} - executing via Claude Code...")
 
-        result = await execute_task(
-            repo_url=f"https://github.com/{repo}",
-            base_ref=default_branch,
-            task=task,
-            issue_number=issue_num,
-            token=token,
-        )
+            result = await execute_task(
+                repo_url=f"https://github.com/{repo}",
+                base_ref=default_branch,
+                task=task,
+                issue_number=issue_num,
+                token=token,
+            )
 
-        # Post result
-        if result.success:
-            # Truncate if very long
-            output = result.output
-            if len(output) > 4000:
-                output = output[:4000] + "\n\n...(truncated)"
-            gh_issue.create_comment(output)
-        else:
-            gh_issue.create_comment(f"I ran into an issue:\n\n```\n{result.output[:1000]}\n```")
+            # Post result
+            if result.success:
+                # Truncate if very long
+                output = result.output
+                if len(output) > 4000:
+                    output = output[:4000] + "\n\n...(truncated)"
+                gh_issue.create_comment(output)
+            else:
+                gh_issue.create_comment(f"I ran into an issue:\n\n```\n{result.output[:1000]}\n```")
 
-        logfire.info(f"{prefix} - complete (success={result.success}, pr={result.pr_url})")
+            logfire.info(f"{prefix} - complete (success={result.success}, pr={result.pr_url})")
+
+        finally:
+            # Remove engineering label when done
+            try:
+                gh_issue.remove_from_labels(ENGINEERING_LABEL)
+            except Exception as e:
+                logfire.warn(f"{prefix} - failed to remove label: {e}")
 
 
 async def handle_pull_request_event(data: dict):
@@ -420,11 +437,22 @@ async def review_pull_request(payload: PullRequestWebhookPayload):
         return
 
     with logfire.span(prefix, repo=repo, pr_number=pr_num):
-        token = get_installation_token(payload.installation.id)
+        github = get_github_client(payload.installation.id)
+        gh_repo = github.get_repo(repo)
+        gh_pr = gh_repo.get_pull(pr_num)
 
-        # Build review task for Claude Code
-        base_ref = payload.pull_request.base["ref"]
-        task = f"""You are reviewing pull request #{pr_num} in {repo}.
+        # Add engineering label to show we're working on it
+        try:
+            gh_pr.add_to_labels(ENGINEERING_LABEL)
+        except Exception as e:
+            logfire.warn(f"{prefix} - failed to add label: {e}")
+
+        try:
+            token = get_installation_token(payload.installation.id)
+
+            # Build review task for Claude Code
+            base_ref = payload.pull_request.base["ref"]
+            task = f"""You are reviewing pull request #{pr_num} in {repo}.
 
 PR title: {payload.pull_request.title}
 
@@ -450,27 +478,31 @@ When posting the review:
 
 Output a brief summary of your review."""
 
-        logfire.info(f"{prefix} - reviewing via Claude Code...")
+            logfire.info(f"{prefix} - reviewing via Claude Code...")
 
-        result = await execute_task(
-            repo_url=f"https://github.com/{repo}",
-            base_ref=payload.pull_request.head["ref"],  # Check out the PR branch
-            task=task,
-            issue_number=pr_num,
-            token=token,
-        )
-
-        if not result.success:
-            # If Claude Code failed, post a comment explaining
-            github = get_github_client(payload.installation.id)
-            gh_repo = github.get_repo(repo)
-            gh_pr = gh_repo.get_pull(pr_num)
-            error_msg = result.output[:1000]
-            gh_pr.create_issue_comment(
-                f"I tried to review this PR but ran into an issue:\n\n```\n{error_msg}\n```"
+            result = await execute_task(
+                repo_url=f"https://github.com/{repo}",
+                base_ref=payload.pull_request.head["ref"],  # Check out the PR branch
+                task=task,
+                issue_number=pr_num,
+                token=token,
             )
 
-        logfire.info(f"{prefix} - complete (success={result.success})")
+            if not result.success:
+                # If Claude Code failed, post a comment explaining
+                error_msg = result.output[:1000]
+                gh_pr.create_issue_comment(
+                    f"I tried to review this PR but ran into an issue:\n\n```\n{error_msg}\n```"
+                )
+
+            logfire.info(f"{prefix} - complete (success={result.success})")
+
+        finally:
+            # Remove engineering label when done
+            try:
+                gh_pr.remove_from_labels(ENGINEERING_LABEL)
+            except Exception as e:
+                logfire.warn(f"{prefix} - failed to remove label: {e}")
 
 
 def get_pr_diff_and_files(gh_pr, prefix: str) -> tuple[str, list[dict]]:
