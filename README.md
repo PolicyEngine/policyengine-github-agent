@@ -6,7 +6,7 @@ GitHub App that automatically responds to issues and reviews PRs on PolicyEngine
 
 1. Create a GitHub App with the required permissions (issues: read/write)
 2. Copy `.env.example` to `.env` and fill in your credentials
-3. Run locally: `uv run uvicorn policyengine_github_bot.main:app --reload` 
+3. Run locally: `uv run uvicorn policyengine_github_bot.main:app --reload`
 
 ## Deployment
 
