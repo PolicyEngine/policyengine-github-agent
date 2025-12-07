@@ -365,7 +365,12 @@ Instructions:
 - Answer questions, fix bugs, implement features, or do whatever is requested
 - If you need to make code changes, create a branch, commit, and open a PR
 - Use `gh` CLI for GitHub operations (PRs, issues, etc.)
-- Be concise and helpful in your final response"""
+- Be concise and helpful in your final response
+
+IMPORTANT - Best practices:
+- Commit and push changes BEFORE running tests when possible
+- This preserves your work if anything goes wrong
+- Update the progress comment before running tests so the user knows what's happening"""
 
             logfire.info(f"{prefix} - executing via Claude Code...")
 
@@ -502,7 +507,12 @@ When posting the review:
 - `gh pr review {pr_num} --comment -b "summary"` for non-blocking feedback
 
 After posting your review, delete the progress comment:
-`gh api repos/{repo}/issues/comments/{comment_id} -X DELETE`"""
+`gh api repos/{repo}/issues/comments/{comment_id} -X DELETE`
+
+IMPORTANT - Best practices:
+- If making fixes, commit and push BEFORE running tests when possible
+- Post your review before running any tests - this preserves your feedback
+- Update the progress comment before running intensive operations"""
 
             logfire.info(f"{prefix} - reviewing via Claude Code...")
 

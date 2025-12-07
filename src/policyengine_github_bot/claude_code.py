@@ -313,6 +313,10 @@ async def execute_task(
 
 If making changes: branch 'bot/{branch_suffix}', commit, push, create PR with `gh pr create`.
 
+IMPORTANT - Memory constraints (4GB limit):
+- Commit and push BEFORE running tests or intensive operations when possible
+- This preserves your work if anything goes wrong
+
 Your response will be posted as a GitHub comment. Write like a human - be direct, no unnecessary headers or formatting. Just say what you did or found."""
 
     # Extract repo name for span
