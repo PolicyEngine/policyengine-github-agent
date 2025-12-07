@@ -213,9 +213,7 @@ Be selective - only file a PR if it would genuinely help future sessions."""
                 if token:
                     env["GH_TOKEN"] = token
 
-                output = await asyncio.to_thread(
-                    run_claude_code, prompt, repo_path, timeout, env
-                )
+                output = await asyncio.to_thread(run_claude_code, prompt, repo_path, timeout, env)
 
                 # Check if a PR was created
                 pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", output)
@@ -321,7 +319,11 @@ Your response will be posted as a GitHub comment. Write like a human - be direct
 
     # Extract repo name for span
     repo_name = repo_url.split("/")[-1] if "/" in repo_url else repo_url
-    span_name = f"[claude-code] {repo_name}#{issue_number}" if issue_number else f"[claude-code] {repo_name}"
+    span_name = (
+        f"[claude-code] {repo_name}#{issue_number}"
+        if issue_number
+        else f"[claude-code] {repo_name}"
+    )
 
     logfire.info(f"{span_name} - starting task", repo_url=repo_url, timeout=timeout)
 

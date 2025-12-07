@@ -1,13 +1,11 @@
 """Tests for Claude Code integration."""
 
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from policyengine_github_bot.claude_code import (
-    TaskResult,
     capture_learnings,
     execute_task,
     gather_review_context,
@@ -330,7 +328,9 @@ class TestCaptureLearnings:
             mock_temp.return_value.__exit__ = MagicMock(return_value=False)
             mock_clone.return_value = Path("/tmp/test/repo")
             mock_subprocess.return_value = MagicMock(returncode=0)
-            mock_run.return_value = "Filed PR: https://github.com/PolicyEngine/policyengine-claude/pull/42"
+            mock_run.return_value = (
+                "Filed PR: https://github.com/PolicyEngine/policyengine-claude/pull/42"
+            )
 
             result = await capture_learnings(
                 task_context="Fix a bug in the tax calculator",

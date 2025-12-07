@@ -251,10 +251,10 @@ async def handle_issue_comment_event(data: dict):
     else:
         logfire.info(f"{prefix} - bot mentioned")
 
-    # If this is a PR and we're mentioned, do a review (or re-review if already reviewed)
+    # If this is a PR and we're mentioned, use Claude Code (flexible - can review, commit, etc.)
     if is_pr and mentioned:
-        logfire.info(f"{prefix} - triggering PR review")
-        await handle_pr_comment_review(payload)
+        logfire.info(f"{prefix} - triggering PR Claude Code request")
+        await handle_pr_claude_code_request(payload)
         return
 
     # Otherwise handle as a normal issue comment
@@ -330,9 +330,7 @@ async def handle_claude_code_request(
             logfire.warn(f"{prefix} - failed to add label: {e}")
 
         # Post initial "working on it" comment - Claude Code will update this
-        progress_comment = gh_issue.create_comment(
-            "⚙️ Working on this..."
-        )
+        progress_comment = gh_issue.create_comment("⚙️ Working on this...")
         comment_id = progress_comment.id
 
         try:
@@ -395,6 +393,92 @@ IMPORTANT - Best practices:
 
         finally:
             # Remove engineering label when done
+            try:
+                gh_issue.remove_from_labels(ENGINEERING_LABEL)
+            except Exception as e:
+                logfire.warn(f"{prefix} - failed to remove label: {e}")
+
+
+async def handle_pr_claude_code_request(payload: IssueCommentWebhookPayload):
+    """Handle any request on a PR using Claude Code - reviews, commits, formatting, etc."""
+    repo = payload.repository.full_name
+    pr_num = payload.issue.number
+    request_text = payload.comment.body
+    prefix = f"[pr-claude-code] {repo}#{pr_num}"
+
+    with logfire.span(prefix, repo=repo, pr_number=pr_num):
+        github = get_github_client(payload.installation.id)
+        gh_repo = github.get_repo(repo)
+        gh_pr = gh_repo.get_pull(pr_num)
+        gh_issue = gh_repo.get_issue(pr_num)
+
+        # Add engineering label to show we're working on it
+        try:
+            gh_issue.add_to_labels(ENGINEERING_LABEL)
+        except Exception as e:
+            logfire.warn(f"{prefix} - failed to add label: {e}")
+
+        # Post initial "working on it" comment
+        progress_comment = gh_issue.create_comment("⚙️ Working on this...")
+        comment_id = progress_comment.id
+
+        try:
+            token = get_installation_token(payload.installation.id)
+
+            # Build context for Claude Code with PR-specific info
+            task = f"""You are responding to a comment on a GitHub pull request.
+
+Repository: {repo}
+PR #{pr_num}: {gh_pr.title}
+PR branch: {gh_pr.head.ref}
+Base branch: {gh_pr.base.ref}
+
+PR description:
+{gh_pr.body or "(no description)"}
+
+User request:
+{request_text}
+
+Progress updates:
+- There's a comment (ID: {comment_id}) that says "⚙️ Working on this..."
+- Update this comment as you work to keep the user informed of progress
+- Use: `gh api repos/{repo}/issues/comments/{comment_id} -X PATCH -f body="your update"`
+- Update when: starting a major step, finding something important, making progress
+- Keep updates concise - just a line or two about what you're doing
+- Your final update should be your complete response (not a progress update)
+
+Instructions:
+- You have full flexibility to do whatever the user asks
+- This could be: reviewing code, fixing issues, running commands, committing changes, etc.
+- If making changes, commit and push to the PR branch ({gh_pr.head.ref})
+- Use `gh` CLI for GitHub operations
+- Be concise and helpful in your final response
+
+IMPORTANT - Git workflow:
+- The repo will be cloned with the PR branch already checked out
+- Commit and push changes BEFORE running tests when possible
+- This preserves your work if anything goes wrong"""
+
+            logfire.info(f"{prefix} - executing via Claude Code...")
+
+            result = await execute_task(
+                repo_url=f"https://github.com/{repo}",
+                base_ref=gh_pr.head.ref,  # Use the PR branch, not the default branch
+                task=task,
+                issue_number=pr_num,
+                token=token,
+            )
+
+            if not result.success:
+                progress_comment.edit(f"I ran into an issue:\n\n```\n{result.output[:1000]}\n```")
+
+            logfire.info(f"{prefix} - complete (success={result.success})")
+
+        except Exception as e:
+            progress_comment.edit(f"I ran into an issue:\n\n```\n{e}\n```")
+            logfire.error(f"{prefix} - error: {e}")
+
+        finally:
             try:
                 gh_issue.remove_from_labels(ENGINEERING_LABEL)
             except Exception as e:
@@ -465,9 +549,7 @@ async def review_pull_request(payload: PullRequestWebhookPayload):
             logfire.warn(f"{prefix} - failed to add label: {e}")
 
         # Post initial progress comment - Claude Code will update this
-        progress_comment = gh_pr.create_issue_comment(
-            "⚙️ Reviewing this PR..."
-        )
+        progress_comment = gh_pr.create_issue_comment("⚙️ Reviewing this PR...")
         comment_id = progress_comment.id
 
         try:
@@ -526,8 +608,9 @@ IMPORTANT - Best practices:
 
             if not result.success:
                 # Update progress comment with error
+                error_msg = result.output[:1000]
                 progress_comment.edit(
-                    f"I tried to review this PR but ran into an issue:\n\n```\n{result.output[:1000]}\n```"
+                    f"I tried to review this PR but ran into an issue:\n\n```\n{error_msg}\n```"
                 )
 
             logfire.info(f"{prefix} - complete (success={result.success})")
