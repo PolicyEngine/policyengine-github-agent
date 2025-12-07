@@ -238,10 +238,10 @@ class TestGatherReviewContext:
             )
 
             prompt = mock_run.call_args[0][0]
-            # Should show first 20 and mention "10 more"
-            assert "file19.py" in prompt
-            assert "file20.py" not in prompt
-            assert "10 more files" in prompt
+            # Should show first 10 and mention "20 more"
+            assert "file9.py" in prompt
+            assert "file10.py" not in prompt
+            assert "20 more" in prompt
 
 
 class TestExecuteTask:

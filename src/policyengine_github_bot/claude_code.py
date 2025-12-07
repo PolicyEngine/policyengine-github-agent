@@ -161,28 +161,19 @@ async def gather_review_context(
     Returns:
         Context string to include in the review prompt
     """
-    files_list = "\n".join(f"- {f}" for f in files_changed[:20])  # Limit for prompt size
-    if len(files_changed) > 20:
-        files_list += f"\n- ... and {len(files_changed) - 20} more files"
+    prompt = f"""Reviewing PR: {pr_title}
 
-    prompt = f"""I'm reviewing a pull request. Help me understand the context.
-
-PR title: {pr_title}
-
-PR description:
 {pr_body or "(no description)"}
 
-Files changed:
-{files_list}
+Files: {", ".join(files_changed[:10])}{f" (+{len(files_changed) - 10} more)" if len(files_changed) > 10 else ""}
 
-Please explore this codebase and provide context that would help review this PR:
+Explore the codebase and tell me:
+- What these files do (one line each)
+- What depends on them
+- Any patterns to keep consistent
+- Relevant conventions (check CLAUDE.md, README)
 
-1. What do the changed files do? (brief summary of each)
-2. What other code depends on or calls into these files?
-3. Are there similar patterns elsewhere that should stay consistent?
-4. Any repo conventions I should know about? (check for CLAUDE.md, README, etc.)
-
-Be concise - bullet points, key facts only. No preamble."""
+Reply as a human would - short sentences, no headers, no preamble."""
 
     with get_temp_repo_dir() as tmpdir:
         repo_path = await clone_repo(
@@ -225,12 +216,9 @@ async def execute_task(
 
     prompt = f"""{task}
 
-If you need to make code changes:
-- Create a new branch named 'bot/{branch_suffix}'
-- Commit with a clear message
-- Push and create a PR (use `gh pr create`)
+If making changes: branch 'bot/{branch_suffix}', commit, push, create PR with `gh pr create`.
 
-Be concise. Your output will be posted as a GitHub comment."""
+Your response will be posted as a GitHub comment. Write like a human - be direct, no unnecessary headers or formatting. Just say what you did or found."""
 
     with logfire.span(
         "[claude-code] Executing task",
