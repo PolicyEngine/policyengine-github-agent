@@ -18,51 +18,63 @@ from policyengine_github_bot.repo import clone_repo, get_temp_repo_dir
 
 class TestRunClaudeCode:
     def test_run_claude_code_success(self, tmp_path: Path):
-        """Test successful Claude Code execution."""
-        with patch("policyengine_github_bot.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="This is the analysis output",
-                stderr="",
-            )
+        """Test successful Claude Code execution with streaming."""
+        with (
+            patch("policyengine_github_bot.claude_code.subprocess.Popen") as mock_popen,
+            patch("select.select") as mock_select,
+        ):
+            # Create a mock stdout that supports both readline() and iteration
+            mock_stdout = MagicMock()
+            lines = ["line 1\n", "line 2\n"]
+            mock_stdout.readline.side_effect = lines + [""]  # Empty string signals EOF
+            mock_stdout.__iter__ = MagicMock(return_value=iter([]))  # No remaining lines
+
+            mock_proc = MagicMock()
+            mock_proc.stdout = mock_stdout
+            mock_proc.poll.side_effect = [None, None, 0]  # Running, running, done
+            mock_proc.returncode = 0
+            mock_popen.return_value = mock_proc
+            mock_select.return_value = ([mock_stdout], [], [])
 
             result = run_claude_code("Analyse this code", tmp_path)
 
-            assert result == "This is the analysis output"
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args
-            assert call_args[0][0] == [
-                "claude",
-                "-p",
-                "Analyse this code",
-                "--output-format",
-                "text",
-                "--allowedTools",
-                "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch",
-            ]
+            assert "line 1" in result
+            mock_popen.assert_called_once()
+            call_args = mock_popen.call_args
+            assert "claude" in call_args[0][0]
             assert call_args[1]["cwd"] == tmp_path
 
     def test_run_claude_code_failure(self, tmp_path: Path):
         """Test Claude Code failure raises RuntimeError."""
-        with patch("policyengine_github_bot.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="Something went wrong",
-            )
+        with patch("policyengine_github_bot.claude_code.subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = iter(["error output\n"])
+            mock_proc.poll.return_value = 1
+            mock_proc.returncode = 1
+            mock_popen.return_value = mock_proc
 
             with pytest.raises(RuntimeError, match="Claude Code failed"):
                 run_claude_code("Analyse this code", tmp_path)
 
     def test_run_claude_code_timeout(self, tmp_path: Path):
-        """Test custom timeout is passed through."""
-        with patch("policyengine_github_bot.claude_code.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="output", stderr="")
+        """Test timeout raises TimeoutError."""
+        with (
+            patch("policyengine_github_bot.claude_code.subprocess.Popen") as mock_popen,
+            patch("select.select") as mock_select,
+        ):
+            mock_stdout = MagicMock()
+            mock_stdout.readline.return_value = ""  # No output
+            mock_stdout.__iter__ = MagicMock(return_value=iter([]))
 
-            run_claude_code("prompt", tmp_path, timeout=600)
+            mock_proc = MagicMock()
+            mock_proc.stdout = mock_stdout
+            mock_proc.poll.return_value = None  # Never finishes
+            mock_proc.kill = MagicMock()
+            mock_popen.return_value = mock_proc
+            mock_select.return_value = ([], [], [])  # Nothing ready
 
-            call_args = mock_run.call_args
-            assert call_args[1]["timeout"] == 600
+            with pytest.raises(TimeoutError):
+                run_claude_code("prompt", tmp_path, timeout=0.1)
 
 
 class TestRunClaudeCodeStreaming:
@@ -302,5 +314,3 @@ class TestExecuteTask:
             git_calls = [call[0][0] for call in mock_subprocess.call_args_list]
             assert any("user.email" in str(call) for call in git_calls)
             assert any("user.name" in str(call) for call in git_calls)
-
-

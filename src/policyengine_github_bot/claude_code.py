@@ -25,7 +25,7 @@ def run_claude_code(
     timeout: int = 300,
     env: dict | None = None,
 ) -> str:
-    """Run Claude Code CLI in a directory and return output.
+    """Run Claude Code CLI in a directory, stream output to logfire, and return result.
 
     Args:
         prompt: The prompt to send to Claude Code
@@ -36,9 +36,12 @@ def run_claude_code(
     Returns:
         The output from Claude Code
     """
+    import select
+    import time
+
     logfire.info(f"[claude-code] Running in {workdir}")
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [
             "claude",
             "-p",
@@ -49,18 +52,51 @@ def run_claude_code(
             "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch",
         ],
         cwd=workdir,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=timeout,
         env=env,
     )
 
-    if result.returncode != 0:
-        logfire.error(f"[claude-code] Failed: {result.stderr}")
-        raise RuntimeError(f"Claude Code failed: {result.stderr}")
+    output_lines = []
+    start_time = time.time()
 
-    logfire.info(f"[claude-code] Complete ({len(result.stdout)} chars)")
-    return result.stdout
+    try:
+        while True:
+            # Check timeout
+            if time.time() - start_time > timeout:
+                proc.kill()
+                raise TimeoutError(f"Claude Code timed out after {timeout}s")
+
+            # Check if process has finished
+            retcode = proc.poll()
+            if retcode is not None:
+                # Process finished, read any remaining output
+                for line in proc.stdout:
+                    output_lines.append(line)
+                    logfire.info("[claude-code] output", line=line.rstrip())
+                break
+
+            # Try to read a line (non-blocking on unix via select)
+            ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+            if ready:
+                line = proc.stdout.readline()
+                if line:
+                    output_lines.append(line)
+                    logfire.info("[claude-code] output", line=line.rstrip())
+
+    except Exception as e:
+        proc.kill()
+        raise e
+
+    if proc.returncode != 0:
+        output = "".join(output_lines)
+        logfire.error(f"[claude-code] Failed with code {proc.returncode}")
+        raise RuntimeError(f"Claude Code failed (exit {proc.returncode}): {output[-500:]}")
+
+    output = "".join(output_lines)
+    logfire.info(f"[claude-code] Complete ({len(output)} chars)")
+    return output
 
 
 def run_claude_code_streaming(
