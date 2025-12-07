@@ -196,48 +196,56 @@ If you need to make code changes:
 
 Be concise. Your output will be posted as a GitHub comment."""
 
-    with get_temp_repo_dir() as tmpdir:
-        try:
-            repo_path = await clone_repo(
-                repo_url=repo_url,
-                target_dir=tmpdir,
-                ref=base_ref,
-                token=token,
-            )
+    with logfire.span(
+        "[claude-code] Executing task",
+        repo_url=repo_url,
+        issue_number=issue_number,
+        timeout=timeout,
+    ):
+        with get_temp_repo_dir() as tmpdir:
+            try:
+                repo_path = await clone_repo(
+                    repo_url=repo_url,
+                    target_dir=tmpdir,
+                    ref=base_ref,
+                    token=token,
+                )
 
-            # Configure git for commits (author info)
-            subprocess.run(
-                ["git", "config", "user.email", "bot@policyengine.org"],
-                cwd=repo_path,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "policyengine-bot"],
-                cwd=repo_path,
-                check=True,
-            )
+                # Configure git for commits (author info)
+                subprocess.run(
+                    ["git", "config", "user.email", "bot@policyengine.org"],
+                    cwd=repo_path,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.name", "policyengine-bot"],
+                    cwd=repo_path,
+                    check=True,
+                )
 
-            # Set up environment with GitHub token for gh CLI
-            env = os.environ.copy()
-            if token:
-                env["GH_TOKEN"] = token
+                # Set up environment with GitHub token for gh CLI
+                env = os.environ.copy()
+                if token:
+                    env["GH_TOKEN"] = token
 
-            output = run_claude_code(prompt, repo_path, timeout=timeout, env=env)
+                import asyncio
 
-            # Try to extract PR URL from output
-            pr_url = None
-            pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", output)
-            if pr_match:
-                pr_url = pr_match.group(0)
+                output = await asyncio.to_thread(run_claude_code, prompt, repo_path, timeout, env)
 
-            logfire.info(
-                "[claude-code] Task completed",
-                pr_url=pr_url,
-                output_length=len(output),
-            )
+                # Try to extract PR URL from output
+                pr_url = None
+                pr_match = re.search(r"https://github\.com/[^\s]+/pull/\d+", output)
+                if pr_match:
+                    pr_url = pr_match.group(0)
 
-            return TaskResult(output=output, success=True, pr_url=pr_url)
+                logfire.info(
+                    "[claude-code] Task completed",
+                    pr_url=pr_url,
+                    output_length=len(output),
+                )
 
-        except Exception as e:
-            logfire.error(f"[claude-code] Task failed: {e}")
-            return TaskResult(output=str(e), success=False)
+                return TaskResult(output=output, success=True, pr_url=pr_url)
+
+            except Exception as e:
+                logfire.error(f"[claude-code] Task failed: {e}")
+                return TaskResult(output=str(e), success=False)

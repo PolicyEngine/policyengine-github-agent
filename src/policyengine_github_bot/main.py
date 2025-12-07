@@ -1,5 +1,8 @@
 """FastAPI application for PolicyEngine GitHub bot."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 import logfire
 from fastapi import FastAPI
 
@@ -7,6 +10,11 @@ from policyengine_github_bot.config import get_settings
 from policyengine_github_bot.webhooks import router as webhook_router
 
 settings = get_settings()
+
+# Configure a larger thread pool for Claude Code tasks (which can take minutes)
+# Default is min(32, os.cpu_count() + 4) which may not be enough
+executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="claude-code-")
+asyncio.get_event_loop().set_default_executor(executor)
 
 logfire.configure(
     token=settings.logfire_token,
