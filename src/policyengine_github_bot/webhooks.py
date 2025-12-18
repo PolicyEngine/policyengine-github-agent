@@ -105,6 +105,24 @@ def issue_has_engineering_label(gh_issue) -> bool:
         return False
 
 
+def count_claude_code_invocations(gh_issue) -> int:
+    """Count how many times Claude Code has been invoked on this issue.
+
+    Returns the number of "⚙️ Working on this..." comments from the bot.
+    """
+    try:
+        count = 0
+        comments = gh_issue.get_comments()
+        for comment in comments:
+            if (comment.user.login.lower() == BOT_USERNAME.lower() and
+                "⚙️ Working on this..." in comment.body):
+                count += 1
+        return count
+    except Exception as e:
+        logfire.error(f"Failed to count Claude Code invocations: {e}")
+        return 0
+
+
 def get_conversation_context(github, repo_full_name: str, issue_number: int) -> list[dict]:
     """Get the conversation history for context."""
     try:
@@ -386,6 +404,17 @@ async def handle_claude_code_request(
         logfire.info(f"{prefix} - skipped (engineering label already present)")
         return
 
+    # Skip if Claude Code has been invoked 5+ times already (prevent doom loops)
+    invocation_count = count_claude_code_invocations(gh_issue)
+    if invocation_count >= 5:
+        logfire.info(f"{prefix} - skipped (invoked {invocation_count} times already)")
+        gh_issue.create_comment(
+            f"I've been invoked {invocation_count} times on this issue already. "
+            "To prevent endless loops, I'm not running again. "
+            "If you need me to continue, please close and reopen the issue."
+        )
+        return
+
     github = get_github_client(payload.installation.id)
 
     with logfire.span(prefix, repo=repo, issue_number=issue_num):
@@ -518,6 +547,17 @@ async def handle_pr_claude_code_request(payload: IssueCommentWebhookPayload):
     # Skip if engineering label is already present (another Claude Code session is working)
     if issue_has_engineering_label(gh_issue):
         logfire.info(f"{prefix} - skipped (engineering label already present)")
+        return
+
+    # Skip if Claude Code has been invoked 5+ times already (prevent doom loops)
+    invocation_count = count_claude_code_invocations(gh_issue)
+    if invocation_count >= 5:
+        logfire.info(f"{prefix} - skipped (invoked {invocation_count} times already)")
+        gh_issue.create_comment(
+            f"I've been invoked {invocation_count} times on this PR already. "
+            "To prevent endless loops, I'm not running again. "
+            "If you need me to continue, please close and reopen the PR."
+        )
         return
 
     with logfire.span(prefix, repo=repo, pr_number=pr_num):
@@ -719,6 +759,17 @@ async def review_pull_request(payload: PullRequestWebhookPayload):
     # Skip if engineering label is already present (another Claude Code session is working)
     if issue_has_engineering_label(gh_pr):
         logfire.info(f"{prefix} - skipped (engineering label already present)")
+        return
+
+    # Skip if Claude Code has been invoked 5+ times already (prevent doom loops)
+    invocation_count = count_claude_code_invocations(gh_pr)
+    if invocation_count >= 5:
+        logfire.info(f"{prefix} - skipped (invoked {invocation_count} times already)")
+        gh_pr.create_issue_comment(
+            f"I've been invoked {invocation_count} times on this PR already. "
+            "To prevent endless loops, I'm not running again. "
+            "If you need me to continue, please close and reopen the PR."
+        )
         return
 
     with logfire.span(prefix, repo=repo, pr_number=pr_num):
