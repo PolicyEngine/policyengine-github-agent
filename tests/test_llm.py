@@ -69,7 +69,10 @@ def assert_closed_objects(schema):
 
 @pytest.mark.parametrize("factory, expected, effort", AGENT_CASES)
 @pytest.mark.parametrize("stop_reason", ["end_turn", "refusal"])
-async def test_anthropic_native_output(monkeypatch, factory, expected, effort, stop_reason):
+@pytest.mark.parametrize("thinking_text", ["", "Check the context."])
+async def test_anthropic_native_output(
+    monkeypatch, factory, expected, effort, stop_reason, thinking_text
+):
     """Check wire parameters, mixed content, and refusals across every agent."""
     settings = make_settings(anthropic_model="claude-sonnet-5-5")
     monkeypatch.setattr(llm, "get_settings", lambda: settings)
@@ -88,7 +91,7 @@ async def test_anthropic_native_output(monkeypatch, factory, expected, effort, s
                 "role": "assistant",
                 "model": body["model"],
                 "content": [
-                    {"type": "thinking", "thinking": "Check the context.", "signature": "test"},
+                    {"type": "thinking", "thinking": thinking_text, "signature": "test"},
                     {"type": "text", "text": first},
                     {"type": "text", "text": rest},
                 ],
