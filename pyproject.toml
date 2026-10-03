@@ -5,13 +5,13 @@ description = "PolicyEngine's GitHub bot for auto-reviewing PRs and responding t
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.75.0",
+    "anthropic>=0.108.0,<1",
     "cryptography>=46.0.3",
     "fastapi>=0.123.9",
     "httpx>=0.28.1",
     "logfire[fastapi,requests]>=4.16.0",
     "pydantic>=2.12.5",
-    "pydantic-ai>=1.27.0",
+    "pydantic-ai>=1.107.6,<2",
     "pydantic-settings>=2.12.0",
     "pygithub>=2.8.1",
     "python-multipart>=0.0.20",

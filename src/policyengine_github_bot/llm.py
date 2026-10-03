@@ -1,7 +1,14 @@
 """LLM integration for generating responses using pydantic-ai."""
 
 import logfire
-from pydantic_ai import Agent
+from pydantic_ai import Agent, NativeOutput, RunContext
+from pydantic_ai.capabilities import Hooks
+from pydantic_ai.exceptions import ContentFilterError
+from pydantic_ai.messages import ModelResponse
+from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
+from pydantic_ai.profiles.anthropic import AnthropicModelProfile
+from pydantic_ai.providers.anthropic import AnthropicJsonSchemaTransformer, AnthropicProvider
 
 from policyengine_github_bot.config import get_settings
 from policyengine_github_bot.models import (
@@ -23,25 +30,57 @@ Be friendly but professional. Don't be overly formal.
 If you need more information, ask specific clarifying questions."""
 
 
+def _get_anthropic_model() -> AnthropicModel:
+    """Declare Sonnet 5.5 capabilities until PydanticAI recognises its model ID."""
+    settings = get_settings()
+    profile = None
+    if settings.anthropic_model == "claude-sonnet-5-5":
+        profile = AnthropicModelProfile(
+            supports_json_schema_output=True,
+            json_schema_transformer=AnthropicJsonSchemaTransformer,
+            anthropic_supports_effort=True,
+            anthropic_supports_adaptive_thinking=True,
+            anthropic_supports_forced_tool_choice=False,
+            anthropic_disallows_sampling_settings=True,
+            anthropic_disallows_budget_thinking=True,
+        )
+    return AnthropicModel(
+        settings.anthropic_model,
+        provider=AnthropicProvider(api_key=settings.anthropic_api_key),
+        profile=profile,
+    )
+
+
+response_hooks = Hooks()
+
+
+@response_hooks.on.after_model_request
+def reject_refusal(
+    ctx: RunContext[None], *, request_context: ModelRequestContext, response: ModelResponse
+) -> ModelResponse:
+    """Reject refusals before attempting to parse or return structured output."""
+    if response.finish_reason == "content_filter":
+        raise ContentFilterError("Anthropic refused the request")
+    return response
+
+
 def get_issue_agent(repo_context: str | None = None) -> Agent[None, IssueResponse]:
     """Create an agent for responding to GitHub issues."""
-    settings = get_settings()
-
     system = BASE_SYSTEM_PROMPT + "\n\nYou respond to issues with helpful, accurate information."
     if repo_context:
         system += f"\n\nRepository context:\n{repo_context}"
 
     return Agent(
-        f"anthropic:{settings.anthropic_model}",
-        output_type=IssueResponse,
+        _get_anthropic_model(),
+        output_type=NativeOutput(IssueResponse, strict=True),
+        model_settings=AnthropicModelSettings(anthropic_effort="low", max_tokens=16000),
+        capabilities=[response_hooks],
         system_prompt=system,
     )
 
 
 def get_pr_review_agent(repo_context: str | None = None) -> Agent[None, PRReviewResponse]:
     """Create an agent for reviewing pull requests."""
-    settings = get_settings()
-
     system = (
         BASE_SYSTEM_PROMPT
         + """
@@ -115,8 +154,10 @@ only when you're confident there are no issues.
         system += f"\n\nRepository context:\n{repo_context}"
 
     return Agent(
-        f"anthropic:{settings.anthropic_model}",
-        output_type=PRReviewResponse,
+        _get_anthropic_model(),
+        output_type=NativeOutput(PRReviewResponse, strict=True),
+        model_settings=AnthropicModelSettings(anthropic_effort="medium", max_tokens=16000),
+        capabilities=[response_hooks],
         system_prompt=system,
     )
 
@@ -221,8 +262,6 @@ def get_pr_rereview_agent(
     repo_context: str | None = None,
 ) -> Agent[None, PRReReviewResponse]:
     """Create an agent for re-reviewing pull requests."""
-    settings = get_settings()
-
     system = (
         BASE_SYSTEM_PROMPT
         + """
@@ -252,8 +291,10 @@ Be concise in replies. Examples:
         system += f"\n\nRepository context:\n{repo_context}"
 
     return Agent(
-        f"anthropic:{settings.anthropic_model}",
-        output_type=PRReReviewResponse,
+        _get_anthropic_model(),
+        output_type=NativeOutput(PRReReviewResponse, strict=True),
+        model_settings=AnthropicModelSettings(anthropic_effort="medium", max_tokens=16000),
+        capabilities=[response_hooks],
         system_prompt=system,
     )
 
