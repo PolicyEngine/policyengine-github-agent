@@ -8,6 +8,12 @@ GitHub App that automatically responds to issues and reviews PRs on PolicyEngine
 2. Copy `.env.example` to `.env` and fill in your credentials
 3. Run locally: `uv run uvicorn policyengine_github_bot.main:app --reload`
 
+Issue replies, PR reviews, and re-reviews default to `claude-sonnet-5-5`.
+Issue replies use low effort; reviews use medium effort. All three use native
+structured output and a 16,000-token limit, including thinking tokens.
+`ANTHROPIC_MODEL` (including values in `.env` or Cloud Run) overrides this default;
+overrides must support native structured output and the configured effort levels.
+
 ## Deployment
 
 Deploy to Cloud Run:
