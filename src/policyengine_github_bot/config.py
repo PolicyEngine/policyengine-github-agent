@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str
 
     # Optional: default model
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-sonnet-5-5"
 
     # Logfire
     logfire_token: str | None = None
